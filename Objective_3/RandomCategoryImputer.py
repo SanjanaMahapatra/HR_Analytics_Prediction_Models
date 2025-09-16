@@ -3,105 +3,33 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 
 class RandomCategoryImputer(BaseEstimator, TransformerMixin):
-    def __init__(self, stratify_on=None, alpha=1.0, random_state=None):
-        """
-        stratify_on : column name or list of column names to condition on
-        alpha       : Laplace smoothing constant (>= 0)
-        random_state: seed for reproducibility
-        """
-        self.stratify_on = stratify_on
-        self.alpha = alpha
+    def __init__(self, random_state=None, alpha=1.0, stratify_on=None):
         self.random_state = random_state
-
+        self.alpha = alpha  # Smoothing parameter for Laplace smoothing
+        self.category_probs_ = {}
+        self.stratify_on = stratify_on
+        
     def fit(self, X, y=None):
-        # Always work on a DataFrame
-        if isinstance(X, pd.Series):
-            X = X.to_frame()
-        self.global_categories_ = {
-            col: X[col].dropna().unique().tolist()
-            for col in X.columns
-        }
-        self.distributions_ = {}
-
-        # Helper to compute smoothed probs
-        def _get_probs(counts, categories):
-            # reindex to include all categories
-            counts = counts.reindex(categories, fill_value=0.0)
-            smoothed = counts + self.alpha
-            return smoothed / smoothed.sum()
-
-        # No stratification: build one global distribution per column
-        if not self.stratify_on:
-            for col, cats in self.global_categories_.items():
-                vc = X[col].value_counts(dropna=True)
-                probs = _get_probs(vc, cats)
-                self.distributions_[('global', col)] = {
-                    'categories': cats,
-                    'probs': probs.values
-                }
-
-        # Stratified: build a distribution for each (group, col)
-        else:
-            strat_cols = ([self.stratify_on]
-                          if isinstance(self.stratify_on, str)
-                          else list(self.stratify_on))
-
-            for grp_vals, grp_df in X.groupby(strat_cols):
-                for col, cats in self.global_categories_.items():
-                    vc = grp_df[col].value_counts(dropna=True)
-                    probs = _get_probs(vc, cats)
-                    self.distributions_[(grp_vals, col)] = {
-                        'categories': cats,
-                        'probs': probs.values
-                    }
-
+        if self.random_state is not None:
+            np.random.seed(self.random_state)
+            
+        for col in X.columns:
+            # Calculate probabilities of each category with Laplace smoothing
+            value_counts = X[col].value_counts()
+            smoothed_counts = {k: v + self.alpha for k, v in value_counts.items()}
+            total = sum(smoothed_counts.values())
+            smoothed_probs = {k: v / total for k, v in smoothed_counts.items()}
+            self.category_probs_[col] = smoothed_probs
         return self
-
+    
     def transform(self, X):
-        if isinstance(X, pd.Series):
-            X = X.to_frame()
-        X = X.copy()
-        rng = np.random.RandomState(self.random_state)
-
-        # Stratified path
-        if self.stratify_on:
-            strat_cols = ([self.stratify_on]
-                          if isinstance(self.stratify_on, str)
-                          else list(self.stratify_on))
-
-            for grp_vals, _ in X.groupby(strat_cols):
-                # build mask for group
-                if len(strat_cols) == 1:
-                    mask_grp = X[strat_cols[0]] == grp_vals
-                else:
-                    mask_grp = np.ones(len(X), dtype=bool)
-                    for col_name, val in zip(strat_cols, grp_vals):
-                        mask_grp &= (X[col_name] == val)
-
-                for col in X.columns:
-                    key = (grp_vals, col)
-                    dist = self.distributions_.get(key)
-                    if dist is None:
-                        continue
-                    mask_nan = mask_grp & X[col].isna()
-                    cnt = mask_nan.sum()
-                    if cnt:
-                        draw = rng.choice(dist['categories'],
-                                          size=cnt,
-                                          p=dist['probs'])
-                        X.loc[mask_nan, col] = draw
-
-        # Global path
-        else:
-            for col in X.columns:
-                dist = self.distributions_[('global', col)]
-                mask_nan = X[col].isna()
-                cnt = mask_nan.sum()
-                if cnt:
-                    draw = rng.choice(dist['categories'],
-                                      size=cnt,
-                                      p=dist['probs'])
-                    X.loc[mask_nan, col] = draw
-
-        # If single‐column input, return a Series
-        return X.iloc[:, 0] if X.shape[1] == 1 else X
+        X_transformed = X.copy()
+        for col in X.columns:
+            mask = X[col].isna()
+            n_missing = mask.sum()
+            if n_missing > 0:
+                categories = list(self.category_probs_[col].keys())
+                probabilities = list(self.category_probs_[col].values())
+                random_choices = np.random.choice(categories, size=n_missing, p=probabilities)
+                X_transformed.loc[mask, col] = random_choices
+        return X_transformed
