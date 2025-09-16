@@ -8,3 +8,5 @@ kaggle
 prettytable
 xgboost
 jinja2
+plotly
+lightgbm
